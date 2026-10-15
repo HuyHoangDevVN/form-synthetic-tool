@@ -4,6 +4,39 @@ Sinh và gửi phản hồi tổng hợp cho Google Forms do bạn quản lý đ
 form, biểu đồ và luồng nhập liệu. Python 3.8+, chỉ dùng thư viện chuẩn.
 Dữ liệu không đại diện cho thực trạng hay kết quả nghiên cứu.
 
+## Giao diện desktop
+
+```powershell
+python gui.py
+```
+
+Không cần sửa JSON. Giao diện dùng Tkinter có sẵn trong bản cài Python
+thông thường trên Windows; không cài thêm thư viện.
+
+1. Nhập link form, số phản hồi, mã lô rồi bấm **Tải câu hỏi**.
+2. Chọn câu hỏi bên trái, nhập trọng số từng lựa chọn bên phải. Tỷ lệ và
+   số dòng dự kiến được cập nhật ngay, không bắt buộc tổng trọng số là 100.
+3. Với câu thang 1–5, có thể áp dụng tỷ lệ vừa chỉnh cho mọi câu cùng thang.
+4. Bấm **Tạo / kiểm tra lô**. Cấu hình được lưu tự động vào `config.local.json`;
+   CSV, báo cáo và nhật ký vẫn nằm trong thư mục `.batches/` như CLI.
+5. Bấm **Gửi thử 1**, kiểm tra kết quả trên Forms/Sheet, rồi **Gửi phần còn lại**.
+6. **Dừng sau lượt hiện tại** chờ lượt đang gửi hoàn tất, giữ nhật ký để chạy tiếp.
+
+Để mở lại lô, bấm **Mở cấu hình / lô đã tạo…**, chọn cấu hình JSON hoặc
+`manifest.json` của lô đó. Không cần đọc hay chỉnh nội dung file. Giữ mã lô,
+form, số lượng và tỷ lệ ban đầu khi tiếp tục. Thay đổi cấu hình của lô đã
+tạo sẽ bị chặn, giống CLI. Mã lô mới là lô mới, không có nghĩa là tiếp tục.
+
+GUI gọi chung `tool.py`: khóa chống chạy song song, hash dữ liệu, bỏ qua
+dòng đã xác nhận và dừng khi kết quả chưa rõ đều được giữ. Nếu gặp dòng
+chưa rõ, chạy tiếp sẽ hiện hai nút đối chiếu; chỉ chọn **Dòng đã lưu** hoặc
+**Dòng chưa lưu** sau khi kiểm tra Forms/Sheet. Lựa chọn đó sẽ tiếp tục gửi.
+Đóng cửa sổ khi đang gửi cũng đợi lượt hiện tại xong trước khi thoát.
+
+Phần tải form và gửi chạy nền để cửa sổ vẫn phản hồi. Lỗi tải/phân bố được
+hiển thị ở thanh trạng thái, không tự tạo hoặc gửi một lô thay thế.
+Trên máy không có màn hình, các test GUI được đánh dấu SKIP; test core vẫn chạy.
+
 ## Cấu hình và sử dụng
 
 ```powershell

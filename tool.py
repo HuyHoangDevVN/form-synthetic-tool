@@ -49,7 +49,10 @@ def weights(values):
 
 
 def load_config(path):
-    config = json.loads(path.read_text(encoding='utf-8-sig'))
+    return validate_config(json.loads(path.read_text(encoding='utf-8-sig')))
+
+
+def validate_config(config):
     allowed = {'form_url', 'batch_id', 'count', 'seed', 'distributions', 'likert_weights'}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError('Unknown config keys; see config.example.json.')
@@ -128,11 +131,15 @@ def field_weights(field, config):
         if set(rule) != set(choices):
             raise ValueError('Distribution choices differ from form: ' + field['key'])
         return [rule[choice] for choice in choices]
-    if 'likert_weights' in config and len(choices) == 5 and all(
-            re.match(r'^{}(?:\s*[—–-]|$)'.format(i), choice)
-            for i, choice in enumerate(choices, 1)):
+    if 'likert_weights' in config and is_likert(field):
         return config['likert_weights']
     return [1] * len(choices)
+
+
+def is_likert(field):
+    return len(field['options']) == 5 and all(
+        re.match(r'^{}(?:\s*[—–-]|$)'.format(i), choice)
+        for i, choice in enumerate(field['options'], 1))
 
 
 def generate(fields, config):
@@ -292,7 +299,7 @@ def remaining_rows(rows, journal, identity):
     return pending, unknown
 
 
-def send_batch(folder, config, fields, limit=None, resolution=None):
+def send_batch(folder, config, fields, limit=None, resolution=None, stop=None, progress=None):
     with batch_lock(folder):
         rows, identity = load_batch(folder, config, fields)
         journal = folder / 'send-log.jsonl'
@@ -312,6 +319,9 @@ def send_batch(folder, config, fields, limit=None, resolution=None):
                 print('All rows already confirmed or reconciled as saved. Nothing submitted.')
                 return
             for position, (index, row) in enumerate(pending):
+                if stop is not None and stop.is_set():
+                    print('Stopped before the next row. Confirmed rows kept in journal.')
+                    return
                 append_record(log, identity, index, 'attempting')
                 try:
                     submit(config['form_url'], row, fields)
@@ -319,6 +329,8 @@ def send_batch(folder, config, fields, limit=None, resolution=None):
                     append_record(log, identity, index, 'unknown_or_failed')
                     raise
                 append_record(log, identity, index, 'confirmation_received')
+                if progress is not None:
+                    progress(index, len(rows))
                 print('{}/{} confirmation received'.format(index, len(rows)), flush=True)
                 if position < len(pending) - 1:
                     time.sleep(0.5)
