@@ -7,3 +7,5 @@ responses*.csv
 send-log*.jsonl
 distribution*.json
 questions.json
+.batches/
+config.local.json

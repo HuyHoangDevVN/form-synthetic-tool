@@ -1,7 +1,11 @@
-import unittest
+from collections import Counter
+from contextlib import redirect_stdout
+import copy
+import io
 import json
 from pathlib import Path
 import tempfile
+import unittest
 from unittest.mock import patch
 
 import tool
@@ -9,98 +13,200 @@ import tool
 
 class ToolTests(unittest.TestCase):
     def setUp(self):
-        self.fields = [{'key': tool.SECTOR, 'options': list('ABCDE')},
-                       {'key': 'entry.2', 'options': ['1', '2', '3']}]
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.fields = [
+            {'key': 'entry.10', 'title': 'Gender', 'options': ['A', 'B', 'Other']},
+            {'key': 'entry.20', 'title': 'Scale', 'options': [str(i) + ' — answer' for i in range(1, 6)]}]
+        self.config = {'form_url': 'https://docs.google.com/forms/d/e/fixture/',
+                       'batch_id': 'test-batch', 'count': 37, 'seed': 1,
+                       'distributions': {'entry.10': {'A': 46, 'B': 46, 'Other': 8}},
+                       'likert_weights': [4, 6, 25, 40, 25]}
+        self.output = io.StringIO()
 
-    def test_balanced_valid_reproducible(self):
-        rows = tool.generate(self.fields)
-        self.assertEqual(rows, tool.generate(self.fields))
-        self.assertEqual(set(tool.validate(self.fields, rows).values()), {40})
+    def load(self, config):
+        path = self.root / 'config.json'
+        path.write_text(json.dumps(config), encoding='utf-8')
+        return tool.load_config(path)
 
-    def test_invalid_choice_rejected(self):
-        rows = tool.generate(self.fields)
-        rows[0]['entry.2'] = 'invalid'
-        with self.assertRaises(ValueError):
-            tool.validate(self.fields, rows)
+    def prepare(self):
+        folder = self.root / 'batch'
+        with redirect_stdout(self.output):
+            tool.prepare(folder, self.config, self.fields)
+        return folder
 
-    def test_topup_preserves_every_question_proportion(self):
-        baseline = tool.generate(self.fields)
-        extra = tool.topup(self.fields, baseline)
-        tool.validate(self.fields, extra, balanced=False, expected_count=36)
-        self.assertEqual(extra, tool.topup(self.fields, baseline))
-        for field in self.fields:
-            for choice in field['options']:
-                before = sum(row[field['key']] == choice for row in baseline)
-                added = sum(row[field['key']] == choice for row in extra)
-                self.assertLess(abs(added - 36 * before / 200), 1)
+    def send(self, folder, **kwargs):
+        with redirect_stdout(self.output), patch('tool.time.sleep'):
+            tool.send_batch(folder, self.config, self.fields, **kwargs)
 
-    def test_csv_roundtrip_and_no_overwrite(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / 'responses.csv'
-            rows = tool.generate(self.fields)
-            tool.write_rows(path, self.fields, rows)
-            self.assertEqual(tool.read_rows(path), rows)
-            with self.assertRaises(FileExistsError):
-                tool.write_rows(path, self.fields, rows)
-            self.assertEqual(tool.read_rows(path), rows)
+    def test_config_normalizes_full_form_urls(self):
+        for suffix in ['viewform?usp=sharing', 'formResponse', '']:
+            config = dict(self.config, form_url=self.config['form_url'] + suffix)
+            self.assertEqual(self.load(config), self.config)
 
-    def test_revised_distribution(self):
-        fields = [{'key': tool.SECTOR, 'options': [
-            'Sức khỏe', 'Kỹ thuật – Công nghệ', 'Kinh tế - Kinh doanh',
-            'Khoa học xã hội – Nhân văn', 'Nghệ thuật và Thiết kế']}] + self.fields[1:] + [
-            {'key': 'entry.863899056', 'options': ['Nam', 'Nữ', 'Khác']},
-            {'key': 'entry.scale1', 'options': [str(i) + ' — answer' for i in range(1, 6)]},
-            {'key': 'entry.scale2', 'options': [str(i) + ' — answer' for i in range(1, 6)]}]
-        rows = tool.generate(fields, revised=True)
-        self.assertEqual(rows, tool.generate(fields, revised=True))
-        counts = tool.validate(fields, rows, balanced=False)
-        self.assertEqual(sorted(counts.values()), [30, 36, 40, 44, 50])
-        self.assertEqual(counts['Kỹ thuật – Công nghệ'], 50)
-        self.assertEqual(counts['Nghệ thuật và Thiết kế'], 30)
-        self.assertEqual(sum(row['entry.863899056'] == 'Khác' for row in rows), 16)
-        for key in ['entry.scale1', 'entry.scale2']:
-            low = sum(row[key][0] in '12' for row in rows)
-            self.assertTrue(12 <= low <= 24)
-            self.assertEqual({row[key][0] for row in rows}, set('12345'))
+    def test_config_rejects_invalid_inputs(self):
+        for changes in [
+                {'count': 0}, {'count': -1}, {'count': True}, {'count': 3.2},
+                {'batch_id': '../escape'}, {'batch_id': ''}, {'seed': True},
+                {'form_url': 'http://docs.google.com/forms/d/e/id/viewform'},
+                {'form_url': 'https://docs.google.com.evil.test/forms/d/e/id/viewform'},
+                {'form_url': 'https://user:password@docs.google.com/forms/d/e/id/viewform'},
+                {'likert_weights': [1, 2]}, {'likert_weights': [0] * 5},
+                {'distributions': {'entry.10': {'Other': -1}}}, {'typo': 'value'}]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.load(dict(self.config, **changes))
 
-    def test_imbalance_rejected(self):
-        rows = tool.generate(self.fields)
-        for row in rows:
-            row[tool.SECTOR] = 'A'
-        with self.assertRaises(ValueError):
-            tool.validate(self.fields, rows)
+    def test_weights_reject_nonfinite_and_non_numeric_values(self):
+        for values in [[-1, 2], [float('nan'), 1], [float('inf')], [True, 1], ['5', 2], []]:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                tool.weights(values)
 
-    def test_confirmation_required(self):
-        with patch('tool.fetch_form', return_value=('', [])), \
-                patch('tool.build_payload', return_value={}), patch('tool.urlopen') as network:
-            response = network.return_value.__enter__.return_value
-            response.status = 200
-            response.read.return_value = b'<html>Validation error</html>'
+    def test_largest_remainder_preserves_total_and_proportions(self):
+        for total in [1, 7, 36, 200, 236, 501]:
+            values = [0, 20, 25, 22, 18, 15]
+            counts = tool.allocate(total, values)
+            self.assertEqual(sum(counts), total)
+            self.assertEqual(counts[0], 0)
+            for actual, weight in zip(counts, values):
+                self.assertLess(abs(actual - total * weight / 100), 1)
+        self.assertEqual(tool.allocate(200, [46, 46, 8]), [92, 92, 16])
+        self.assertEqual(tool.allocate(36, [20, 25, 22, 18, 15]), [7, 9, 8, 7, 5])
+
+    def test_generation_uses_config_not_fixed_count_or_entry_ids(self):
+        for count in [1, 37, 236, 501]:
+            config = dict(self.config, count=count)
+            rows = tool.generate(self.fields, config)
+            tool.validate(self.fields, rows, count)
+            self.assertEqual(rows, tool.generate(self.fields, config))
+            for field in self.fields:
+                actual = Counter(row[field['key']] for row in rows)
+                expected = tool.allocate(count, tool.field_weights(field, config))
+                self.assertEqual([actual[choice] for choice in field['options']], expected)
+
+    def test_per_entry_override_beats_likert_default(self):
+        config = copy.deepcopy(self.config)
+        config['distributions']['entry.20'] = {choice: i for i, choice in enumerate(self.fields[1]['options'])}
+        self.assertEqual(tool.field_weights(self.fields[1], config), [0, 1, 2, 3, 4])
+        self.assertEqual(tool.field_weights(self.fields[0], dict(config, distributions={})), [1, 1, 1])
+
+    def test_unknown_or_incomplete_distributions_fail(self):
+        for rules in [{'entry.999': {'A': 1}}, {'entry.10': {'A': 1}}]:
             with self.assertRaises(ValueError):
-                tool.submit({})
-            response.read.return_value = b'<div class="vHW8K">Recorded</div>'
-            tool.submit({})
+                tool.generate(self.fields, dict(self.config, distributions=rules))
 
-    def test_resume_requires_reconciliation_and_skips_confirmed(self):
-        with tempfile.TemporaryDirectory() as folder:
-            journal = Path(folder) / 'log.jsonl'
-            journal.write_text('\n'.join(json.dumps(record) for record in [
-                {'row': 1, 'protocol': 2, 'status': 'confirmation_received'},
-                {'row': 2, 'protocol': 2, 'status': 'attempting'}]) + '\n', encoding='utf-8')
-            rows = [{}, {}, {}]
+    def test_validation_rejects_bad_answers_and_count(self):
+        rows = tool.generate(self.fields, self.config)
+        with self.assertRaises(ValueError):
+            tool.validate(self.fields, rows, 200)
+        rows[0]['entry.10'] = 'invalid'
+        with self.assertRaises(ValueError):
+            tool.validate(self.fields, rows, self.config['count'])
+        rows[0]['extra'] = 'value'
+        with self.assertRaises(ValueError):
+            tool.validate(self.fields, rows, self.config['count'])
+
+    def test_prepare_is_idempotent_and_never_overwrites_csv(self):
+        folder = self.prepare()
+        original = (folder / 'responses.csv').read_bytes()
+        with redirect_stdout(self.output):
+            tool.prepare(folder, self.config, self.fields)
+        self.assertEqual((folder / 'responses.csv').read_bytes(), original)
+        with self.assertRaises(FileExistsError):
+            tool.write_rows(folder / 'responses.csv', self.fields, [])
+
+    def test_csv_or_config_or_schema_change_blocks_send(self):
+        folder = self.prepare()
+        with patch('tool.submit') as submit:
+            changed = dict(self.config, count=38)
+            with self.assertRaisesRegex(ValueError, 'config or live schema'):
+                tool.send_batch(folder, changed, self.fields)
+            changed_fields = copy.deepcopy(self.fields)
+            changed_fields[0]['options'].append('New choice')
+            with self.assertRaisesRegex(ValueError, 'config or live schema'):
+                tool.send_batch(folder, self.config, changed_fields)
+            rows = tool.read_rows(folder / 'responses.csv')
+            rows[0]['entry.10'] = 'B' if rows[0]['entry.10'] != 'B' else 'A'
+            with (folder / 'responses.csv').open('w', encoding='utf-8-sig', newline='') as stream:
+                writer = tool.csv.DictWriter(stream, fieldnames=[field['key'] for field in self.fields])
+                writer.writeheader()
+                writer.writerows(rows)
+            with self.assertRaisesRegex(ValueError, 'CSV or manifest changed'):
+                self.send(folder)
+            submit.assert_not_called()
+
+    def test_resume_never_resends_confirmed_rows(self):
+        folder = self.prepare()
+        with patch('tool.submit') as submit:
+            self.send(folder, limit=2)
+            self.assertEqual(submit.call_count, 2)
+            submit.reset_mock()
+            self.send(folder)
+            self.assertEqual(submit.call_count, 35)
+            submit.reset_mock()
+            self.send(folder)
+            submit.assert_not_called()
+
+    def test_interrupt_requires_explicit_reconciliation(self):
+        folder = self.prepare()
+        with patch('tool.submit', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.send(folder, limit=1)
+        self.assertFalse((folder / 'send.lock').exists())
+        with patch('tool.submit') as submit:
+            with self.assertRaisesRegex(ValueError, 'Uncertain rows'):
+                self.send(folder)
+            submit.assert_not_called()
+            self.send(folder, resolution='saved', limit=1)
+            rows = tool.read_rows(folder / 'responses.csv')
+            self.assertEqual(submit.call_args[0][1], rows[1])
+
+    def test_not_saved_resolution_retries_only_uncertain_row(self):
+        folder = self.prepare()
+        with patch('tool.submit', side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):
+                self.send(folder, limit=1)
+        with patch('tool.submit') as submit:
+            self.send(folder, resolution='not-saved', limit=1)
+            self.assertEqual(submit.call_args[0][1], tool.read_rows(folder / 'responses.csv')[0])
+
+    def test_batch_lock_prevents_parallel_senders(self):
+        folder = self.prepare()
+        with tool.batch_lock(folder), patch('tool.submit') as submit:
+            with self.assertRaisesRegex(ValueError, 'locked'):
+                self.send(folder)
+            submit.assert_not_called()
+
+    def test_mismatched_legacy_and_corrupt_journals_fail_closed(self):
+        folder = self.prepare()
+        journal = folder / 'send-log.jsonl'
+        for record in [{'protocol': 2}, {'protocol': 3, 'batch_hash': 'other'}]:
+            journal.write_text(json.dumps(record) + '\n', encoding='utf-8')
+            with patch('tool.submit') as submit:
+                with self.assertRaisesRegex(ValueError, 'mismatched journal'):
+                    self.send(folder)
+                submit.assert_not_called()
+        journal.write_text('{"truncated":', encoding='utf-8')
+        with patch('tool.submit') as submit:
             with self.assertRaises(ValueError):
-                tool.remaining_rows(rows, journal)
-            self.assertEqual(tool.remaining_rows(rows, journal, 'saved'), [(3, {})])
-            self.assertEqual(tool.remaining_rows(rows, journal), [(3, {})])
+                self.send(folder)
+            submit.assert_not_called()
 
-    def test_not_saved_row_can_be_sent_again(self):
-        with tempfile.TemporaryDirectory() as folder:
-            journal = Path(folder) / 'log.jsonl'
-            journal.write_text(json.dumps({'row': 1, 'protocol': 2, 'status': 'unknown_or_failed'}) + '\n',
-                               encoding='utf-8')
-            self.assertEqual(tool.remaining_rows([{}], journal, 'not-saved'), [(1, {})])
+    def test_schema_is_dynamic_and_rejects_unsupported_types(self):
+        item = [1, 'Question', None, 2, [[123, [['A'], ['B']], 1]]]
+        data = [None, [None, [[9, 'Section', None, 8], item]]]
+        self.assertEqual(tool.parse_schema(data)[0]['key'], 'entry.123')
+        item[3] = 3
+        self.assertEqual(tool.parse_schema(data)[0]['options'], ['A', 'B'])
+        item[3] = 0
+        with self.assertRaises(ValueError):
+            tool.parse_schema(data)
+        item[3] = 2
+        item[4][0][1][0] = ['A', None, 99]
+        with self.assertRaises(ValueError):
+            tool.parse_schema(data)
 
-    def test_multisection_payload_keeps_answers_and_navigation(self):
+    def test_multisection_payload_and_confirmation(self):
         html = '<input type="hidden" name="fvv" value="1">' \
                '<input type="hidden" name="fbzx" value="fixture">' \
                '<input type="hidden" name="pageHistory" value="0">'
@@ -109,17 +215,52 @@ class ToolTests(unittest.TestCase):
         payload = tool.build_payload({'entry.2': 'choice'}, html, data)
         self.assertEqual(payload['pageHistory'], '0,1,2')
         self.assertEqual(payload['entry.2'], 'choice')
-        self.assertEqual(payload['fbzx'], 'fixture')
         with self.assertRaises(ValueError):
             tool.build_payload({}, '', data)
+        with patch('tool.fetch_form', return_value=(html, data)), \
+                patch('tool.parse_schema', return_value=self.fields), patch('tool.urlopen') as network:
+            response = network.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b'<html>Validation error</html>'
+            with self.assertRaises(ValueError):
+                tool.submit(self.config['form_url'], {}, self.fields)
+            response.read.return_value = b'<div class="vHW8K">Recorded</div>'
+            tool.submit(self.config['form_url'], {}, self.fields)
 
-    def test_legacy_confirmation_is_not_trusted(self):
-        with tempfile.TemporaryDirectory() as folder:
-            journal = Path(folder) / 'log.jsonl'
-            journal.write_text(json.dumps({'row': 1, 'status': 'confirmation_received'}),
-                               encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'Legacy journal'):
-                tool.remaining_rows([{}], journal)
+    def test_schema_change_during_sending_never_posts(self):
+        with patch('tool.fetch_form', return_value=('', [])), \
+                patch('tool.parse_schema', return_value=[]), patch('tool.urlopen') as network:
+            with self.assertRaises(ValueError):
+                tool.submit(self.config['form_url'], {}, self.fields)
+            network.assert_not_called()
+
+    def test_section_branching_is_rejected(self):
+        data = [None, [None, [[1, 'Section', None, 8, None, 123]]]]
+        with self.assertRaisesRegex(ValueError, 'Section branching'):
+            tool.parse_schema(data)
+
+    def test_cli_prepare_and_resume_with_configured_batch(self):
+        path = self.root / 'config.json'
+        path.write_text(json.dumps(self.config), encoding='utf-8')
+        with patch('tool.ROOT', self.root), patch('tool.fetch_form', return_value=('', [])), \
+                patch('tool.parse_schema', return_value=self.fields), \
+                patch('tool.submit') as submit, patch('tool.time.sleep'), redirect_stdout(self.output):
+            with patch('sys.argv', ['tool.py', 'prepare', '--config', str(path)]):
+                tool.main()
+            submit.assert_not_called()
+            for _ in range(2):
+                with patch('sys.argv', ['tool.py', 'send', '--config', str(path)]):
+                    tool.main()
+            self.assertEqual(submit.call_count, self.config['count'])
+
+    def test_cli_rejects_invalid_send_options_before_network(self):
+        for args in [['send', '--limit', '0'], ['prepare', '--limit', '1'],
+                     ['prepare', '--resolve-last', 'saved']]:
+            with patch('sys.argv', ['tool.py'] + args + ['--config', 'unused.json']), \
+                    patch('tool.fetch_form') as fetch, redirect_stdout(self.output), \
+                    patch('sys.stderr', self.output), self.assertRaises(SystemExit):
+                tool.main()
+            fetch.assert_not_called()
 
 
 if __name__ == '__main__':

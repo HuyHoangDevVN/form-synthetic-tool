@@ -1,0 +1,21 @@
+{
+  "form_url": "https://docs.google.com/forms/d/e/1FAIpQLSd1OXNYk755mEzIBDpJmcOgsDD_C7sOOsbvBW4OYjJohIaZgw/viewform",
+  "batch_id": "example-200",
+  "count": 200,
+  "seed": 20261015,
+  "likert_weights": [4, 6, 25, 40, 25],
+  "distributions": {
+    "entry.863899056": {
+      "Nam": 46,
+      "Nữ": 46,
+      "Khác": 8
+    },
+    "entry.453271923": {
+      "Sức khỏe": 20,
+      "Kỹ thuật – Công nghệ": 25,
+      "Kinh tế - Kinh doanh": 22,
+      "Khoa học xã hội – Nhân văn": 18,
+      "Nghệ thuật và Thiết kế": 15
+    }
+  }
+}

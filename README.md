@@ -1,106 +1,129 @@
-# 200 phản hồi tổng hợp cho form kiểm thử
+# Synthetic Form Tool
 
-Python 3.8+, chỉ dùng thư viện chuẩn. Tool này gắn với một form cụ thể
-(URL và entry ID trong `tool.py`), không phải trình gửi cho mọi Google Form.
+Sinh và gửi phản hồi tổng hợp cho Google Forms do bạn quản lý để kiểm thử
+form, biểu đồ và luồng nhập liệu. Python 3.8+, chỉ dùng thư viện chuẩn.
+Dữ liệu không đại diện cho thực trạng hay kết quả nghiên cứu.
 
-## Chạy từ checkout mới
+## Cấu hình và sử dụng
+
+```powershell
+Copy-Item config.example.json config.local.json
+# Sửa form_url, batch_id, count và các tỷ lệ trong config.local.json.
+python tool.py diagnose --config config.local.json
+python tool.py prepare --config config.local.json
+```
+
+`diagnose` chỉ đọc, in entry ID, tên câu hỏi, lựa chọn và lịch sử trang.
+`prepare` tạo CSV, manifest và báo cáo phân bố, chưa gửi. Kết quả ở:
+
+```text
+.batches/<form-id>/<batch_id>/responses.csv
+.batches/<form-id>/<batch_id>/manifest.json
+.batches/<form-id>/<batch_id>/distribution.json
+```
+
+Xem CSV/báo cáo trước khi gửi thử:
+
+```powershell
+python tool.py send --config config.local.json --limit 1
+# Đối chiếu dữ liệu đủ các câu trong Forms/Sheet, rồi gửi phần còn lại:
+python tool.py send --config config.local.json
+```
+
+`send` thay đổi dữ liệu trên form. Tool gửi tuần tự, nghỉ 0,5 giây giữa
+các lượt và dừng ngay khi lỗi; không tự retry hay gửi song song.
+Không cần đổi `count` để gửi tiếp: giữ cùng config và chạy `send` lại.
+`--limit` chỉ giới hạn số dòng đang chờ gửi trong một lần chạy.
+
+## Các trường cấu hình
+
+| Trường | Ý nghĩa |
+|---|---|
+| `form_url` | Link đầy đủ `https://docs.google.com/forms/d/e/ID/viewform` hoặc `formResponse`. Không dùng link rút gọn `forms.gle`. |
+| `batch_id` | Tên lô duy nhất trong cùng form; 1–64 ký tự chữ/số, `_`, `-`. Giữ nguyên khi chạy tiếp. |
+| `count` | Tổng số dòng của lô, số nguyên dương; không cố định 200 hoặc 36. |
+| `seed` | Seed xáo trộn có thể tái lập; mặc định `20261015`. |
+| `distributions` | Ánh xạ `entry.ID` sang trọng số của **tất cả** lựa chọn trong câu đó. Mặc định `{}`. |
+| `likert_weights` | Tùy chọn: 5 trọng số dùng cho các câu có nhãn bắt đầu bằng `1` đến `5`, ví dụ `[4,6,25,40,25]`. |
+
+Trọng số không cần tổng bằng 100: `[46,46,8]` và `[0.46,0.46,0.08]`
+có cùng ý nghĩa. Giá trị phải hữu hạn, không âm, tổng lớn hơn 0. Trọng số
+0 loại lựa chọn đó khỏi dữ liệu được sinh. Câu không có cấu hình riêng
+hoặc không khớp thang Likert được chia đều. Phân bố riêng theo entry ID
+ưu tiên hơn `likert_weights`; có thể đặt tỷ lệ khác nhau cho từng câu.
+
+Các nhãn trong `distributions` phải trùng chính xác nhãn trên form, kể cả
+dấu cách và dấu gạch. `diagnose` cho biết ID/nhãn cần dùng. Ví dụ trong
+`config.example.json` ứng với form trước đây; khi đổi form, cập nhật hoặc
+xóa các entry không còn tồn tại. Tool từ chối ID/lựa chọn sai thay vì bỏ qua.
+
+Số lượng mỗi lựa chọn được chia theo phương pháp phần dư lớn nhất để
+luôn đủ `count`. Sai lệch so với hạn ngạch lý tưởng nhỏ hơn một dòng
+mỗi lựa chọn; trường hợp hòa được ưu tiên theo thứ tự lựa chọn trên form.
+Thứ tự trả lời được xáo trộn độc lập theo seed, không mô phỏng tương quan
+giữa các câu. Mức 4–5 nghĩa là đồng ý, không tự đảo chiều câu tiêu cực.
+
+## Chạy tiếp và tránh gửi trùng
+
+Mỗi lô có `send-log.jsonl` riêng, gắn với SHA-256 của form/cấu hình, schema
+và toàn bộ CSV. Dòng đã nhận xác nhận hoặc đã được đối chiếu là lưu thành
+công sẽ được bỏ qua. Sửa CSV, config hoặc schema khi đang gửi dở làm tool
+dừng; khôi phục đúng bản gốc trước khi chạy tiếp. `prepare` lại không ghi đè.
+
+Khóa `send.lock` ngăn hai tiến trình gửi cùng một lô. Ctrl+C thông thường
+sẽ nhả khóa; nếu tiến trình bị kill/máy mất điện, khóa có thể còn. Chỉ xóa
+file khóa sau khi chắc chắn không còn tiến trình gửi và đã kiểm tra nhật ký.
+Không xóa nhật ký, manifest hay đổi `batch_id` để né một lần gửi chưa rõ.
+
+Nếu timeout/Ctrl+C xảy ra trong lúc gửi, Google có thể đã lưu dữ liệu.
+Tool dừng ở dòng chưa rõ kết quả, yêu cầu đối chiếu Forms/Sheet:
+
+```powershell
+# Chỉ khi đã kiểm tra dòng chưa rõ ĐÃ được Google lưu:
+python tool.py send --config config.local.json --resolve-last saved
+# Hoặc chỉ khi đã kiểm tra dòng đó CHƯA được lưu:
+python tool.py send --config config.local.json --resolve-last not-saved
+```
+
+Hai lệnh trên ghi kết quả đối chiếu rồi tiếp tục lô; không tự kiểm chứng
+phía Google. Không thể bảo đảm exactly-once qua lỗi mạng vì Google Forms
+không cung cấp khóa idempotency cho cách gửi này. Không đổi sang máy khác
+mà bỏ quên thư mục lô. Lô khác hoặc bản clone khác không chia sẻ khóa/nhật ký.
+Batch ID mới được coi là **một lô mới**, có thể thêm phản hồi trùng với lô cũ.
+
+Muốn bổ sung 36 dòng: dùng config mới với `count: 36`, `batch_id` mới và
+giữ tỷ lệ đã chọn. Phân bố sau khi gộp có thể lệch nhẹ do làm tròn. Để bám
+đúng phân bố thực tế lô cũ, đặt trọng số từng câu bằng số lượng lựa chọn
+trong báo cáo `distribution.json` của lô đó.
+
+## Tương thích dữ liệu cũ
+
+CLI mới yêu cầu `--config`; thay cho `revise`, `extend`, `--revised`,
+`--topup` và các đường dẫn CSV cố định. Những CSV và log cũ ở thư mục gốc
+được giữ nguyên, không tự nhập vào lô mới hoặc gửi lại. Các lô cũ đã gửi
+200 + 36 dòng không tự được tạo thành lô `example-200` trong cấu hình mẫu.
+Không chạy lệnh gửi của ví dụ trên form cũ nếu không muốn thêm một lô mới.
+
+Nhật ký phiên bản 2 trở xuống không có hash đầy đủ nên không được dùng
+để tiếp tục lô phiên bản 3. Giữ bản cũ làm bằng chứng và đối chiếu dữ liệu
+phía Google trước khi quyết định tạo một lô mới. Không có bước xóa phản hồi.
+
+## Kiểm tra và giới hạn
 
 ```powershell
 python -m unittest -v
-python tool.py diagnose
-python tool.py revise
-python tool.py send --revised --limit 1
-# Kiểm tra phản hồi đủ 31 câu trên Forms/Sheet, rồi gửi phần còn lại:
-python tool.py send --revised
 ```
 
-Chỉ chạy các lệnh `send` khi muốn thêm dữ liệu vào form kiểm thử.
-Repo chỉ lưu code, test và hướng dẫn. CSV, nhật ký gửi, schema tải về và
-báo cáo được bỏ qua bởi `.gitignore`; giữ chúng ở máy khi đang gửi dở.
-Không thêm dependency hoặc yêu cầu cài đặt ngoài Python.
+Test dùng mạng giả lập, kiểm tra phân bố, cấu hình, khóa, hash, resume và
+xử lý gián đoạn. Test PASS không chứng minh dữ liệu đã lưu phía Google.
+Trang xác nhận chỉ chứng minh máy chủ trả trang xác nhận; cần đối chiếu
+ít nhất một phản hồi đủ câu trả lời trên Forms/Sheet trước khi gửi hàng loạt.
 
-## Bổ sung 36 dòng
+Hỗ trợ câu chọn một và dropdown, cùng các trang tuần tự. Tool từ chối
+checkbox, văn bản, lưới, upload, thang loại khác, lựa chọn Other nhập tự do
+và rẽ nhánh. Form yêu cầu đăng nhập/CAPTCHA không được vượt qua. Cấu trúc
+HTML nhúng và class xác nhận không phải API ổn định của Google; có thể
+cần cập nhật parser khi Google thay đổi.
 
-`python tool.py extend` tạo `responses-topup-36.csv` dựa trên tỷ lệ từng câu
-trong CSV v2 bằng phương pháp phần dư lớn nhất, rồi xáo trộn với seed cố định.
-`distribution-total-236.json` ghi phân bố kết hợp 236 dòng. Số nguyên có thể
-làm tỷ lệ lệch nhẹ. Lệnh không ghi đè CSV có sẵn và chưa gửi phản hồi.
-`python tool.py send --topup` gửi tối đa 36 dòng bổ sung bằng nhật ký riêng
-`send-log-topup-36.jsonl`; không gửi lại 200 dòng v2.
-
-## Bộ dữ liệu điều chỉnh
-
-`python tool.py revise` tạo riêng `responses-revised-v2.csv` và báo cáo đếm
-`distribution-revised-v2.json`, không ghi đè dữ liệu/nhật ký cũ và không gửi.
-Giới tính: Nam 92, Nữ 92, Khác 16 (8%). Khối ngành: Sức khỏe 40 (20%),
-Kỹ thuật – Công nghệ 50 (25%), Kinh tế - Kinh doanh 44 (22%), Khoa học
-xã hội – Nhân văn 36 (18%), Nghệ thuật và Thiết kế 30 (15%).
-Mỗi câu Likert có phân bố riêng: mức 1 là 4–10 dòng, mức 2 là 8–14,
-mức 3 là 40–60, mức 4 là 70–90, mức 5 nhận phần còn lại. Tổng mức 1–2
-là 6–12%, mức 3–5 là 88–94%. Không đảo chiều các câu diễn đạt tiêu cực:
-mức cao chỉ là đồng ý, không mặc nhiên là kết quả tốt.
-Lệnh `send` mặc định vẫn dùng CSV cũ. `python tool.py send --revised` gửi CSV
-v2 với nhật ký riêng `send-log-revised-v2.jsonl`. Chỉ gửi lô thay thế sau khi
-đã xử lý phản hồi cũ trên Google; tool không tự xóa dữ liệu trên form.
-
-Python 3.8 trở lên, không cần cài thư viện. Chạy PowerShell tại folder này:
-
-```powershell
-python tool.py prepare
-python -m unittest -v
-python tool.py diagnose
-python tool.py send
-```
-
-`prepare` chỉ đọc form và xuất `responses.csv` (200 dòng), `questions.json`
-(ánh xạ entry ID sang câu hỏi). File CSV mở được bằng Excel. Đã chạy prepare
-thì không cần chạy lại; nếu chạy lại, lệnh kiểm tra CSV và giữ nguyên file có sẵn.
-
-`send` gửi đúng CSV đã tạo lên form được cấu hình trong `tool.py`, tuần tự,
-nghỉ 0,5 giây sau mỗi phản hồi (chưa tính thời gian mạng). Tổng thời gian nghỉ
-cho 200 dòng là 99,5 giây, thay vì 597 giây trước đây. Vẫn gửi tuần tự và dừng
-ngay khi lỗi; không gửi song song hoặc tự thử lại. Chỉ chạy khi muốn thêm dữ
-liệu vào form. Không thêm nhãn
-vào câu trả lời; tính tổng hợp được ghi trong tài liệu này và nhật ký riêng.
-
-5 khối ngành, mỗi ngành 40 phản hồi. Mỗi câu còn lại cũng chia đều các lựa
-chọn rồi xáo trộn độc lập với seed cố định. Đây là dữ liệu để kiểm tra biểu
-đồ và luồng nhập liệu, không mô phỏng tương quan hay thực trạng sinh viên.
-
-`send-log.jsonl` ghi lần thử và kết quả. HTTP 200 một mình không được coi là
-thành công: cần có phần tử xác nhận trong trang trả về. Tool dừng khi lỗi,
-CAPTCHA, đăng nhập hoặc không thấy xác nhận; không tự retry. Chạy `send` lại
-sẽ bỏ qua những dòng đã nhận xác nhận. Nếu bị ngắt giữa lần gửi, tool báo
-dòng chưa rõ kết quả và dừng. Đối chiếu phản hồi trong Google Forms/Sheet:
-
-```powershell
-# Chỉ khi đã xác minh dòng chưa rõ ĐÃ được Google lưu:
-python tool.py send --resolve-last saved
-# Hoặc chỉ khi đã xác minh dòng đó CHƯA được lưu:
-python tool.py send --resolve-last not-saved
-```
-
-Không đoán kết quả dựa riêng vào lỗi mạng: Google có thể đã lưu trước khi
-kết nối bị ngắt. Không xóa nhật ký, sửa/thay CSV khi đang gửi dở, hoặc chạy
-nhiều tiến trình gửi cùng lúc. Tool không tự đối chiếu dữ liệu phía Google.
-
-Cấu trúc nhúng và class xác nhận của Google không phải API ổn định; nếu
-Google thay đổi, cần cập nhật parser. Không có proxy, giả fingerprint hay
-vượt CAPTCHA. Không trộn bộ dữ liệu này vào kết quả nghiên cứu thực tế.
-
-## Sửa lỗi form nhiều trang
-
-Bản cũ thiếu metadata điều hướng trang nên trang xác nhận không chứng minh
-các câu trả lời đã được lưu. Bản sửa đọc các trường ẩn mới cho từng lượt gửi
-và gửi `pageHistory` bao gồm toàn bộ trang. `diagnose` chỉ đọc, không gửi.
-Test cục bộ kiểm tra payload, chưa chứng minh dữ liệu được lưu phía Google.
-Cần đối chiếu một phản hồi đủ 31 câu trên Forms/Sheet trước khi gửi hàng loạt.
-
-Gửi thử tối đa một dòng đang chờ: `python tool.py send --limit 1`.
-Sau khi kiểm tra dữ liệu phía Forms, `python tool.py send` tiếp tục các dòng
-còn lại theo nhật ký; không gửi lại dòng đã nhận xác nhận. `--limit` nhận 1–200.
-
-Nhật ký cũ không có `protocol: 2` bị chặn, kể cả dòng từng nhận xác nhận.
-Không dùng `--resolve-last` để coi cả lô cũ là thành công. Giữ CSV và nhật ký
-cũ; đối chiếu từng phản hồi trên Forms/Sheet trước khi quyết định làm lô mới.
-Tool không xóa hoặc sửa các phản hồi rỗng đã tồn tại phía Google.
+`.batches/`, `config.local.json`, CSV, log và báo cáo cũ được bỏ qua bởi
+Git. Repo chỉ lưu code, test, hướng dẫn và cấu hình mẫu.
