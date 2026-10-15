@@ -19,11 +19,13 @@ class App:
         self.events = queue.Queue()
         self.stop = threading.Event()
         self.busy = False
+        self.can_stop = False
         self.closing = False
         self.fields = []
         self.loaded_base = None
         self.current = None
         self.editors = []
+        self.choice_labels = []
         self.rules = {}
         self.config = {}
         self.last_limit = None
@@ -35,8 +37,9 @@ class App:
             style.theme_use('vista')
         for name in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
             tkfont.nametofont(name).configure(family='Segoe UI', size=10)
-        style.configure('Title.TLabel', font=('Segoe UI', 20, 'bold'))
+        style.configure('Title.TLabel', font=('Segoe UI', 18, 'bold'))
         style.configure('Heading.TLabel', font=('Segoe UI', 11, 'bold'))
+        style.configure('Error.TLabel', foreground='#a12622')
         style.configure('Treeview', rowheight=30)
         self.url = tk.StringVar()
         self.count = tk.StringVar(value='200')
@@ -58,15 +61,15 @@ class App:
         self.poll_id = root.after(100, self.poll)
 
     def build(self):
-        frame = ttk.Frame(self.root, padding=20)
+        frame = ttk.Frame(self.root, padding=16)
         frame.pack(fill='both', expand=True)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(3, weight=1)
         ttk.Label(frame, text='Phản hồi tổng hợp', style='Title.TLabel').grid(sticky='w')
         ttk.Label(frame, text='Nhập form · phân bổ dữ liệu · xem trước rồi gửi',
-                  padding=(0, 4, 0, 16)).grid(row=1, sticky='w')
+                  padding=(0, 4, 0, 8)).grid(row=1, sticky='w')
         settings = ttk.Frame(frame)
-        settings.grid(row=2, sticky='ew', pady=(0, 14))
+        settings.grid(row=2, sticky='ew', pady=(0, 10))
         settings.columnconfigure(1, weight=1)
         ttk.Label(settings, text='Link Google Form').grid(row=0, column=0, sticky='w', padx=(0, 12))
         self.url_entry = ttk.Entry(settings, textvariable=self.url)
@@ -93,7 +96,7 @@ class App:
         questions.columnconfigure(0, weight=1)
         ttk.Label(questions, text='Câu hỏi', style='Heading.TLabel').grid(sticky='w', pady=(0, 8))
         self.tree = ttk.Treeview(questions, show='tree', selectmode='browse')
-        self.tree.column('#0', width=350, minwidth=260)
+        self.tree.column('#0', width=310, minwidth=240)
         self.tree.grid(row=1, sticky='nsew')
         scroll = ttk.Scrollbar(questions, command=self.tree.yview)
         scroll.grid(row=1, column=1, sticky='ns')
@@ -112,7 +115,8 @@ class App:
         canvas_frame.grid(row=1, sticky='nsew')
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(canvas_frame, highlightthickness=0, background='#f0f0f0')
+        self.canvas = tk.Canvas(canvas_frame, highlightthickness=0,
+                                background=ttk.Style(self.root).lookup('TFrame', 'background'))
         self.canvas.grid(sticky='nsew')
         scrollbar = ttk.Scrollbar(canvas_frame, command=self.canvas.yview)
         scrollbar.grid(row=0, column=1, sticky='ns')
@@ -121,13 +125,16 @@ class App:
         self.options.columnconfigure(0, weight=1)
         self.window = self.canvas.create_window(0, 0, window=self.options, anchor='nw')
         self.options.bind('<Configure>', lambda _: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.bind('<Configure>', lambda event: self.canvas.itemconfigure(self.window, width=event.width))
-        ttk.Label(editor, textvariable=self.preview, wraplength=570).grid(row=2, sticky='ew', pady=(10, 6))
+        self.canvas.bind('<Configure>', self.resize_options)
+        self.canvas.bind('<MouseWheel>', self.scroll_options)
+        editor.bind('<Configure>', lambda event: self.question_title.configure(wraplength=max(200, event.width - 20)))
+        self.preview_label = ttk.Label(editor, textvariable=self.preview, wraplength=570)
+        self.preview_label.grid(row=2, sticky='ew', pady=(8, 6))
         self.apply_button = ttk.Button(editor, text='Áp dụng tỷ lệ này cho mọi câu thang 1–5', command=self.apply_scales)
         self.apply_button.grid(row=3, sticky='w')
         split.add(editor, weight=3)
 
-        ttk.Separator(frame).grid(row=4, sticky='ew', pady=(14, 10))
+        ttk.Separator(frame).grid(row=4, sticky='ew', pady=(10, 8))
         actions = ttk.Frame(frame)
         actions.grid(row=5, sticky='ew')
         self.prepare_button = ttk.Button(actions, text='Tạo / kiểm tra lô', command=self.prepare_batch)
@@ -141,7 +148,7 @@ class App:
         self.progress = ttk.Progressbar(frame, mode='determinate')
         self.progress.grid(row=6, sticky='ew', pady=(10, 4))
         ttk.Label(frame, textvariable=self.status, wraplength=1040).grid(row=7, sticky='ew')
-        ttk.Label(frame, textvariable=self.path_label, wraplength=1040).grid(row=8, sticky='ew', pady=(4, 0))
+        self.path_widget = ttk.Label(frame, textvariable=self.path_label, wraplength=1040)
         self.recovery = ttk.Frame(frame)
         ttk.Label(self.recovery, text='Đối chiếu Forms/Sheet trước khi chọn:').pack(side='left')
         ttk.Button(self.recovery, text='Dòng đã lưu — tiếp tục',
@@ -165,6 +172,9 @@ class App:
         self.loaded_base = None
         self.current = None
         self.tree.delete(*self.tree.get_children())
+        self.path_label.set('')
+        self.path_widget.grid_remove()
+        self.progress.configure(value=0)
         self.render_options()
         self.recovery.grid_remove()
         self.set_busy(False)
@@ -211,8 +221,7 @@ class App:
     def commit_question(self):
         if self.current is None:
             return
-        values = [float(variable.get().replace(',', '.')) for variable, _, _ in self.editors]
-        tool.weights(values)
+        values = self.weight_values()
         current_values = tool.field_weights(self.current, dict(self.config, distributions=self.rules))
         if values != current_values:
             self.rules[self.current['key']] = dict(zip(self.current['options'], values))
@@ -231,11 +240,14 @@ class App:
             return
         self.current = self.fields[index]
         self.render_options()
+        self.set_busy(False)
 
     def render_options(self):
         for child in self.options.winfo_children():
             child.destroy()
         self.editors = []
+        self.choice_labels = []
+        self.preview_label.configure(style='TLabel')
         if self.current is None:
             self.question_title.configure(text='Phân bố từng lựa chọn')
             self.preview.set('Tải form, sau đó chọn câu hỏi ở bên trái.')
@@ -246,16 +258,47 @@ class App:
         config = dict(self.config, distributions=self.rules)
         values = tool.field_weights(self.current, config)
         for index, (choice, value) in enumerate(zip(self.current['options'], values), 1):
-            ttk.Label(self.options, text=choice, wraplength=310).grid(row=index, column=0, sticky='w', padx=4, pady=8)
+            choice_label = ttk.Label(self.options, text=choice, wraplength=310)
+            choice_label.grid(row=index, column=0, sticky='w', padx=4, pady=6)
+            self.choice_labels.append(choice_label)
             variable = tk.StringVar(value=str(value))
             entry = ttk.Entry(self.options, textvariable=variable, width=8)
             entry.grid(row=index, column=1, sticky='w', padx=4)
             label = ttk.Label(self.options)
             label.grid(row=index, column=2, sticky='w', padx=4)
             self.editors.append((variable, entry, label))
+            entry.bind('<FocusIn>', self.reveal_entry)
             variable.trace_add('write', lambda *_: self.update_preview())
+        for child in self.options.winfo_children():
+            child.bind('<MouseWheel>', self.scroll_options)
         self.canvas.yview_moveto(0)
+        self.resize_options()
         self.update_preview()
+
+    def weight_values(self):
+        values = [float(variable.get().replace(',', '.')) for variable, _, _ in self.editors]
+        tool.weights(values)
+        return values
+
+    def resize_options(self, event=None):
+        width = event.width if event else self.canvas.winfo_width()
+        self.canvas.itemconfigure(self.window, width=width)
+        for label in self.choice_labels:
+            label.configure(wraplength=max(120, width - 240))
+        self.preview_label.configure(wraplength=max(200, width))
+
+    def scroll_options(self, event):
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+        return 'break'
+
+    def reveal_entry(self, event):
+        top = self.canvas.canvasy(0)
+        bottom = top + self.canvas.winfo_height()
+        y = event.widget.winfo_y()
+        height = event.widget.winfo_height()
+        if y < top or y + height > bottom:
+            target = y if y < top else y + height - self.canvas.winfo_height()
+            self.canvas.yview_moveto(max(0, target) / max(1, self.options.winfo_height()))
 
     def update_preview(self):
         if not self.editors:
@@ -264,16 +307,18 @@ class App:
             count = int(self.count.get())
             if count <= 0:
                 raise ValueError()
-            values = [float(variable.get().replace(',', '.')) for variable, _, _ in self.editors]
+            values = self.weight_values()
             numbers = tool.weights(values)
             allocated = tool.allocate(count, values)
             for (_, _, label), value, amount in zip(self.editors, numbers, allocated):
                 label.configure(text='{:.1f}% / {}'.format(100 * value / sum(numbers), amount))
-            self.preview.set('Tổng {:g} trọng số → {} dòng. Tỷ lệ tự chuẩn hóa; không cần tổng bằng 100.'.format(sum(values), count))
+            self.preview_label.configure(style='TLabel')
+            self.preview.set('Tổng {:g} trọng số → {} dòng. Tỷ lệ tự chuẩn hóa.'.format(sum(values), count))
         except (ValueError, OverflowError):
             for _, _, label in self.editors:
                 label.configure(text='—')
             self.preview.set('Nhập số phản hồi nguyên dương và trọng số không âm, tổng lớn hơn 0.')
+            self.preview_label.configure(style='Error.TLabel')
 
     def focus_weight(self):
         if self.editors:
@@ -301,6 +346,7 @@ class App:
         except ValueError as error:
             self.status.set(str(error))
             return
+        self.progress.configure(value=0, maximum=config['count'])
         def work():
             folder = tool.batch_path(config)
             tool.prepare(folder, config, self.fields)
@@ -327,13 +373,15 @@ class App:
             pending, _ = tool.remaining_rows(rows, folder / 'send-log.jsonl', identity)
             confirmed = len(rows) - len(pending)
             return ('done', '{} / {} dòng đã xác nhận hoặc đối chiếu đã lưu. {}'.format(
-                confirmed, len(rows), 'Đã dừng an toàn.' if self.stop.is_set() else 'Lượt chạy hoàn tất.'), str(folder))
-        self.start('Đang gửi; giữ nguyên lô và cấu hình để chạy tiếp.', work)
+                confirmed, len(rows), 'Đã dừng an toàn.' if self.stop.is_set() else 'Lượt chạy hoàn tất.'),
+                    str(folder), confirmed, len(rows))
+        self.start('Đang gửi; giữ nguyên lô và cấu hình để chạy tiếp.', work, can_stop=True)
 
-    def start(self, message, job):
+    def start(self, message, job, can_stop=False):
         if self.busy:
             return
         self.stop.clear()
+        self.can_stop = can_stop
         self.recovery.grid_remove()
         self.status.set(message)
         self.set_busy(True)
@@ -350,10 +398,11 @@ class App:
             control.configure(state='disabled' if busy else 'normal')
         for _, entry, _ in self.editors:
             entry.configure(state='disabled' if busy else 'normal')
-        for control in [self.prepare_button, self.pilot_button, self.send_button, self.apply_button]:
+        for control in [self.prepare_button, self.pilot_button, self.send_button]:
             if not self.fields:
                 control.configure(state='disabled')
-        self.stop_button.configure(state='normal' if busy else 'disabled')
+        self.apply_button.configure(state='normal' if not busy and self.current and tool.is_likert(self.current) else 'disabled')
+        self.stop_button.configure(state='normal' if busy and self.can_stop else 'disabled')
 
     def request_stop(self):
         self.stop.set()
@@ -387,6 +436,9 @@ class App:
             elif event[0] == 'done':
                 self.status.set(event[1])
                 self.path_label.set(event[2])
+                self.path_widget.grid(row=8, sticky='ew', pady=(4, 0))
+                if len(event) > 3:
+                    self.progress.configure(value=event[3], maximum=event[4])
             else:
                 self.status.set(event[1])
                 if event[1].startswith('Uncertain rows'):

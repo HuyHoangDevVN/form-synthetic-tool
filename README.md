@@ -35,6 +35,9 @@ chưa rõ, chạy tiếp sẽ hiện hai nút đối chiếu; chỉ chọn **Dò
 
 Phần tải form và gửi chạy nền để cửa sổ vẫn phản hồi. Lỗi tải/phân bố được
 hiển thị ở thanh trạng thái, không tự tạo hoặc gửi một lô thay thế.
+Nhãn lựa chọn tự xuống dòng theo chiều rộng. Cuộn chuột trong bảng tỷ lệ
+hoặc dùng Tab để chuyển ô; ô nhận focus sẽ tự cuộn vào vùng nhìn thấy.
+Nút áp dụng thang điểm chỉ bật với câu 1–5; nút dừng chỉ bật trong lúc gửi.
 Trên máy không có màn hình, các test GUI được đánh dấu SKIP; test core vẫn chạy.
 
 ## Cấu hình và sử dụng

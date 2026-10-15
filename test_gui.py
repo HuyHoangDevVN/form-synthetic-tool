@@ -175,6 +175,29 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.app.rules['entry.30'], dict.fromkeys(choices, 1))
         self.assertEqual(self.app.rules['entry.40'], dict.fromkeys(choices, 1))
 
+    def test_action_buttons_match_question_and_operation(self):
+        self.load_fields()
+        self.assertTrue(self.app.apply_button.instate(['disabled']))
+        self.app.can_stop = False
+        self.app.set_busy(True)
+        self.assertTrue(self.app.stop_button.instate(['disabled']))
+        self.app.can_stop = True
+        self.app.set_busy(True)
+        self.assertTrue(self.app.stop_button.instate(['!disabled']))
+        self.app.set_busy(False)
+
+    def test_long_choices_wrap_and_editor_scrolls(self):
+        self.fields = [{'key': 'entry.50', 'title': 'Câu hỏi có nhiều lựa chọn',
+                        'options': [('Lựa chọn dài cần xuống dòng ' * 3) + str(i) for i in range(15)]}]
+        self.load_fields()
+        self.app.resize_options(type('Size', (), {'width': 500})())
+        self.assertTrue(all(int(label.cget('wraplength')) == 260 for label in self.app.choice_labels))
+        self.app.canvas.configure(height=100)
+        self.root.update()
+        self.app.canvas.configure(scrollregion=self.app.canvas.bbox('all'))
+        self.app.scroll_options(type('Wheel', (), {'delta': -120})())
+        self.assertGreater(self.app.canvas.yview()[0], 0)
+
 
 if __name__ == '__main__':
     unittest.main()
